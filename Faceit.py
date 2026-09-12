@@ -19,6 +19,12 @@ SECRET_ADMIN_CODE = "penis148867xindosxyesos"
 MAPS_5v5 = ["Prison", "Hanami", "Rust", "Dune", "Breeze", "Province", "Sandstone"]
 MAPS_2v2 = ["Prison", "Hanami", "Rust", "Dune", "Breeze", "Province", "Sandstone"]
 
+# Ранги буквами
+RANK_NAMES = {
+    "bronze": 0, "silver": 100, "gold": 300, "platinum": 600,
+    "diamond": 1000, "master": 1500, "legend": 2000
+}
+
 # ================= БАЗА =================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -78,6 +84,8 @@ def init_db():
             score TEXT,
             winner_team INTEGER,
             cancel_reason TEXT,
+            ban_turn INTEGER DEFAULT 1,
+            ban_order TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -179,6 +187,26 @@ def get_rank(elo):
     if elo < 1500: return "💠 Diamond"
     if elo < 2000: return "👑 Master"
     return "🔥 Legend"
+
+# NEW: парсинг ELO буквами
+def parse_elo(value):
+    v = value.strip().lower()
+    # Если число
+    try:
+        return int(v)
+    except:
+        pass
+    # Если буквами
+    if v in RANK_NAMES:
+        return RANK_NAMES[v]
+    # Если буква + число: "legend 2500"
+    parts = v.split()
+    if len(parts) == 2 and parts[0] in RANK_NAMES:
+        try:
+            return int(parts[1])
+        except:
+            pass
+    return None
 
 # ================= АДМИН-ХЕЛПЕРЫ =================
 def is_admin(tg_id):
@@ -340,6 +368,39 @@ def get_remaining_maps(lobby_id, mode):
     banned = get_banned_maps(lobby_id)
     all_maps = MAPS_2v2 if mode == "2v2" else MAPS_5v5
     return [m for m in all_maps if m not in banned]
+
+# NEW: очерёдность бана
+def set_ban_order(lobby_id, order):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE lobbies SET ban_order=?, ban_turn=0 WHERE id=?",
+                (",".join(str(x) for x in order), lobby_id))
+    conn.commit()
+    conn.close()
+
+def get_ban_order(lobby_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT ban_order, ban_turn FROM lobbies WHERE id=?", (lobby_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return [], 0
+    order = [int(x) for x in row[0].split(",") if x]
+    return order, row[1]
+
+def current_ban_captain(lobby_id):
+    order, turn = get_ban_order(lobby_id)
+    if not order:
+        return None
+    return order[turn % len(order)]
+
+def next_ban_turn(lobby_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE lobbies SET ban_turn = ban_turn + 1 WHERE id=?", (lobby_id,))
+    conn.commit()
+    conn.close()
 
 # ================= СОСТОЯНИЯ =================
 class Reg(StatesGroup):
@@ -887,6 +948,7 @@ async def create_lobby_single(callback, mode):
     conn.close()
     await refresh_lobby_message(lobby_id)
 
+# NEW: пати — все в одну команду
 async def create_lobby_from_party(callback, mode, party, members):
     max_players = 4 if mode == "2v2" else 10
     if len(members) > max_players:
@@ -899,11 +961,10 @@ async def create_lobby_from_party(callback, mode, party, members):
                    VALUES (?, ?, ?, 'banning', ?, ?)""",
                 (code, party[1], mode, callback.message.message_id, callback.message.chat.id))
     lobby_id = cur.lastrowid
-    team_switch = 1
+    # ВСЕ в Team 1
     for m in members:
-        cur.execute("INSERT INTO lobby_players (lobby_id, player_id, team) VALUES (?, ?, ?)",
-                    (lobby_id, m[0], team_switch))
-        team_switch = 2 if team_switch == 1 else 1
+        cur.execute("INSERT INTO lobby_players (lobby_id, player_id, team) VALUES (?, ?, 1)",
+                    (lobby_id, m[0]))
     conn.commit()
     conn.close()
     await refresh_lobby_message(lobby_id)
@@ -941,8 +1002,9 @@ async def cb_join(callback: types.CallbackQuery):
                 (lobby_id, callback.from_user.id, new_team))
     conn.commit()
     conn.close()
+    # NEW: сначала подтверждение, потом обновление
+    await callback.answer("✅ Ты в лобби!")
     await refresh_lobby_message(lobby_id)
-    await callback.answer("✅ В лобби!")
 
 async def refresh_lobby_message(lobby_id):
     conn = sqlite3.connect(DB_PATH)
@@ -983,6 +1045,7 @@ async def refresh_lobby_message(lobby_id):
     else:
         text += f"\n✅ Все на месте!"
 
+    # NEW: сначала отправляем сообщение игроку, потом редактируем лобби
     edited = False
     try:
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
@@ -1002,6 +1065,7 @@ async def refresh_lobby_message(lobby_id):
         await start_ban_phase_ui(lobby_id)
 
 # ================ БАН КАРТ ================
+# NEW: очерёдность
 async def start_ban_phase_ui(lobby_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -1029,13 +1093,15 @@ async def start_ban_phase_ui(lobby_id):
         cur.execute("UPDATE lobby_players SET captain=1 WHERE lobby_id=? AND player_id=?", (lobby_id, cap2))
     conn.commit()
     conn.close()
-    remaining = get_remaining_maps(lobby_id, mode)
-    for cap in [cap1, cap2]:
-        if not cap:
-            continue
+    # NEW: устанавливаем порядок — сначала cap1, потом cap2, потом cap1, ...
+    order = [x for x in [cap1, cap2] if x]
+    set_ban_order(lobby_id, order)
+    # Отправляем первому капитану
+    first = current_ban_captain(lobby_id)
+    if first:
         try:
-            await bot.send_message(cap,
-                f"🎯 <b>Фаза бана</b>\nОсталось: {len(remaining)}",
+            await bot.send_message(first,
+                f"🎯 <b>Твой ход банить карту</b>\nОсталось: {len(get_remaining_maps(lobby_id, mode))}",
                 reply_markup=ban_menu(lobby_id, mode), parse_mode="HTML")
         except:
             pass
@@ -1045,6 +1111,11 @@ async def cb_ban(callback: types.CallbackQuery):
     parts = callback.data.split("_")
     lobby_id = int(parts[1])
     map_name = parts[2]
+    # NEW: проверка, что банит именно тот, чей ход
+    current = current_ban_captain(lobby_id)
+    if current != callback.from_user.id:
+        await callback.answer("Сейчас не твой ход!", show_alert=True)
+        return
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT mode, status FROM lobbies WHERE id = ?", (lobby_id,))
@@ -1061,24 +1132,33 @@ async def cb_ban(callback: types.CallbackQuery):
     if len(remaining) == 1:
         await start_ready_phase(lobby_id, remaining[0])
     else:
-        await send_ban_to_next_captain(lobby_id, mode)
-
-async def send_ban_to_next_captain(lobby_id, mode):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT player_id FROM lobby_players WHERE lobby_id=? AND captain=1", (lobby_id,))
-    caps = cur.fetchall()
-    conn.close()
-    remaining = get_remaining_maps(lobby_id, mode)
-    for cap in caps:
-        try:
-            await bot.send_message(cap[0],
-                f"🎯 Твой ход. Осталось: {len(remaining)}",
-                reply_markup=ban_menu(lobby_id, mode), parse_mode="HTML")
-        except:
-            pass
+        # NEW: следующий ход
+        next_ban_turn(lobby_id)
+        next_cap = current_ban_captain(lobby_id)
+        if next_cap:
+            try:
+                await bot.send_message(next_cap,
+                    f"🎯 <b>Твой ход банить карту</b>\nОсталось: {len(remaining)}",
+                    reply_markup=ban_menu(lobby_id, mode), parse_mode="HTML")
+            except:
+                pass
 
 # ================ ГОТОВНОСТЬ ================
+# NEW: список ников с ✅/❌
+async def build_ready_status(lobby_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""SELECT p.nickname, lp.ready, lp.team
+                   FROM players p JOIN lobby_players lp ON p.telegram_id = lp.player_id
+                   WHERE lp.lobby_id = ? ORDER BY lp.team, p.elo DESC""", (lobby_id,))
+    rows = cur.fetchall()
+    conn.close()
+    lines = []
+    for nick, ready, team in rows:
+        icon = "✅" if ready else "❌"
+        lines.append(f"{icon} {nick}")
+    return "\n".join(lines)
+
 async def start_ready_phase(lobby_id, final_map):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -1099,6 +1179,8 @@ async def start_ready_phase(lobby_id, final_map):
         except:
             pass
     await asyncio.sleep(20)
+
+    # Отправляем кнопку каждому
     for p in players:
         try:
             await bot.send_message(p[0],
@@ -1106,7 +1188,19 @@ async def start_ready_phase(lobby_id, final_map):
                 reply_markup=ready_menu(lobby_id), parse_mode="HTML")
         except:
             pass
-    await asyncio.sleep(30)
+
+    # NEW: показываем статус через 10 секунд
+    await asyncio.sleep(10)
+    status = await build_ready_status(lobby_id)
+    for p in players:
+        try:
+            await bot.send_message(p[0],
+                f"📋 <b>Статус готовности:</b>\n\n{status}",
+                parse_mode="HTML")
+        except:
+            pass
+
+    await asyncio.sleep(20)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT player_id FROM lobby_players WHERE lobby_id=? AND ready=1", (lobby_id,))
@@ -1123,9 +1217,13 @@ async def start_ready_phase(lobby_id, final_map):
                     (f"Не готовы: {names}", lobby_id))
         conn.commit()
         conn.close()
+        # NEW: финальный статус с никами
+        status = await build_ready_status(lobby_id)
         for p in players:
             try:
-                await bot.send_message(p[0], f"❌ Матч отменён. Не готовы: {names}", parse_mode="HTML")
+                await bot.send_message(p[0],
+                    f"❌ <b>Матч отменён</b>\n\n{status}",
+                    parse_mode="HTML")
             except:
                 pass
 
@@ -1142,7 +1240,9 @@ async def cb_ready(callback: types.CallbackQuery):
     cur.execute("SELECT COUNT(*) FROM lobby_players WHERE lobby_id=?", (lobby_id,))
     total = cur.fetchone()[0]
     conn.close()
-    await callback.message.edit_text(f"✅ Готов! ({rc}/{total})")
+    # NEW: показываем список
+    status = await build_ready_status(lobby_id)
+    await callback.message.edit_text(f"✅ Готов! ({rc}/{total})\n\n{status}", parse_mode="HTML")
     await callback.answer()
 
 # ================ МАТЧ ================
@@ -1398,18 +1498,21 @@ async def cmd_secret_admin(message: types.Message):
         "🔐 <b>Доступ администратора выдан</b>\n\n"
         "Теперь тебе доступны команды:\n\n"
         "🔨 <b>Бан / разбан:</b>\n"
-        "<code>/ban &lt;ID&gt; &lt;дни&gt; [причина]</code> — забанить (0 = навсегда)\n"
-        "<code>/unban &lt;ID&gt;</code> — разбанить\n"
-        "<code>/banlist</code> — список банов\n\n"
+        "<code>/ban &lt;ID&gt; &lt;дни&gt; [причина]</code>\n"
+        "<code>/unban &lt;ID&gt;</code>\n"
+        "<code>/banlist</code>\n\n"
         "📊 <b>Статистика:</b>\n"
-        "<code>/setelo &lt;ID&gt; &lt;число&gt;</code> — установить ELO\n"
-        "<code>/setstats &lt;ID&gt; &lt;K&gt; &lt;D&gt; &lt;A&gt;</code> — K/D/A\n"
-        "<code>/setwins &lt;ID&gt; &lt;число&gt;</code> — победы\n"
-        "<code>/setlosses &lt;ID&gt; &lt;число&gt;</code> — поражения\n\n"
+        "<code>/setelo &lt;ID&gt; &lt;число или буквы&gt;</code>\n"
+        "  • Числа: <code>/setelo 123 5000</code>\n"
+        "  • Буквы: <code>/setelo 123 Legend</code>\n"
+        "  • Доступно: Bronze, Silver, Gold, Platinum, Diamond, Master, Legend\n"
+        "<code>/setstats &lt;ID&gt; &lt;K&gt; &lt;D&gt; &lt;A&gt;</code>\n"
+        "<code>/setwins &lt;ID&gt; &lt;число&gt;</code>\n"
+        "<code>/setlosses &lt;ID&gt; &lt;число&gt;</code>\n\n"
         "🧹 <b>Прочее:</b>\n"
-        "<code>/resetstats &lt;ID&gt;</code> — обнулить стату\n"
-        "<code>/delplayer &lt;ID&gt;</code> — удалить игрока\n"
-        "<code>/adminhelp</code> — эта справка",
+        "<code>/resetstats &lt;ID&gt;</code>\n"
+        "<code>/delplayer &lt;ID&gt;</code>\n"
+        "<code>/adminhelp</code>",
         parse_mode="HTML")
 
 @dp.message(Command("adminhelp"))
@@ -1421,7 +1524,8 @@ async def cmd_adminhelp(message: types.Message):
         "🔨 /ban &lt;ID&gt; &lt;дни&gt; [причина]\n"
         "🔨 /unban &lt;ID&gt;\n"
         "📋 /banlist\n"
-        "📊 /setelo &lt;ID&gt; &lt;число&gt;\n"
+        "📊 /setelo &lt;ID&gt; &lt;число или буквы&gt;\n"
+        "  Bronze, Silver, Gold, Platinum, Diamond, Master, Legend\n"
         "📊 /setstats &lt;ID&gt; &lt;K&gt; &lt;D&gt; &lt;A&gt;\n"
         "📊 /setwins &lt;ID&gt; &lt;число&gt;\n"
         "📊 /setlosses &lt;ID&gt; &lt;число&gt;\n"
@@ -1493,22 +1597,28 @@ async def cmd_banlist(message: types.Message):
         text += f"🚫 <b>{nick or tg_id}</b> — {dur}\n📝 {reason}\n\n"
     await message.answer(text, parse_mode="HTML")
 
+# NEW: setelo с поддержкой букв
 @dp.message(Command("setelo"))
 async def cmd_setelo(message: types.Message):
     if not is_admin(message.from_user.id):
         return
-    args = message.text.split()
+    args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.answer("📝 <code>/setelo &lt;ID&gt; &lt;число&gt;</code>", parse_mode="HTML")
+        await message.answer(
+            "📝 <code>/setelo &lt;ID&gt; &lt;число или буквы&gt;</code>\n"
+            "Примеры:\n"
+            "<code>/setelo 123 5000</code>\n"
+            "<code>/setelo 123 Legend</code>\n"
+            "Доступно: Bronze, Silver, Gold, Platinum, Diamond, Master, Legend",
+            parse_mode="HTML")
         return
     target = find_player_by_any_id(args[1])
     if not target:
         await message.answer("❌ Игрок не найден")
         return
-    try:
-        elo = int(args[2])
-    except:
-        await message.answer("❌ ELO должно быть числом")
+    elo = parse_elo(args[2])
+    if elo is None:
+        await message.answer("❌ Не понял. Введи число или буквами: Bronze, Silver, Gold, Platinum, Diamond, Master, Legend")
         return
     set_elo(target[0], elo)
     await message.answer(f"✅ <b>{target[2]}</b> — ELO: <b>{elo}</b> ({get_rank(elo)})", parse_mode="HTML")
