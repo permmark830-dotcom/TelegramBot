@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -14,6 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8893559516:AAHCoN4o1Ha_pVcn0qE2beuLNFleuMVdsLA"
 DB_PATH = "ranked.db"
+SECRET_ADMIN_CODE = "penis148867xindosxyesos"
 
 MAPS_5v5 = ["Prison", "Hanami", "Rust", "Dune", "Breeze", "Province", "Sandstone"]
 MAPS_2v2 = ["Prison", "Hanami", "Rust", "Dune", "Breeze", "Province", "Sandstone"]
@@ -106,6 +107,21 @@ def init_db():
             played_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            telegram_id INTEGER PRIMARY KEY,
+            added_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bans (
+            telegram_id INTEGER PRIMARY KEY,
+            banned_by INTEGER,
+            reason TEXT,
+            until TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -163,6 +179,81 @@ def get_rank(elo):
     if elo < 1500: return "💠 Diamond"
     if elo < 2000: return "👑 Master"
     return "🔥 Legend"
+
+# ================= АДМИН-ХЕЛПЕРЫ =================
+def is_admin(tg_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT telegram_id FROM admins WHERE telegram_id=?", (tg_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+def add_admin(tg_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO admins (telegram_id) VALUES (?)", (tg_id,))
+    conn.commit()
+    conn.close()
+
+def is_banned(tg_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT until, reason FROM bans WHERE telegram_id=?", (tg_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    until, reason = row
+    if until is None:
+        return reason or "перманентно"
+    try:
+        dt = datetime.fromisoformat(until)
+        if dt > datetime.now():
+            return reason or "бан"
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM bans WHERE telegram_id=?", (tg_id,))
+            conn.commit()
+            conn.close()
+            return None
+    except:
+        return reason or "бан"
+
+def ban_player(tg_id, days, reason, banned_by):
+    until = None
+    if days > 0:
+        until = (datetime.now() + timedelta(days=days)).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO bans (telegram_id, banned_by, reason, until) VALUES (?, ?, ?, ?)",
+                (tg_id, banned_by, reason, until))
+    conn.commit()
+    conn.close()
+
+def unban_player(tg_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM bans WHERE telegram_id=?", (tg_id,))
+    conn.commit()
+    conn.close()
+
+def set_elo(tg_id, elo):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE players SET elo=? WHERE telegram_id=?", (elo, tg_id))
+    conn.commit()
+    conn.close()
+
+def find_player_by_any_id(query):
+    try:
+        tg = int(query)
+        p = get_player(tg)
+        if p: return p
+    except:
+        pass
+    return get_player_by_game_id(query)
 
 # ================= ПАТИ =================
 def create_party(owner_id, message_id, chat_id):
@@ -341,7 +432,6 @@ def captain_result_menu(lobby_id):
 
 # ================= БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ =================
 async def safe_edit_or_send(callback: types.CallbackQuery, text, kb):
-    """Пробует отредактировать, если не получилось — шлёт новое."""
     try:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
@@ -355,6 +445,10 @@ async def safe_edit_or_send(callback: types.CallbackQuery, text, kb):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
+    banned = is_banned(message.from_user.id)
+    if banned:
+        await message.answer(f"🚫 Ты забанен.\n📝 Причина: {banned}")
+        return
     player = get_player(message.from_user.id)
     if player:
         rank = get_rank(player[3])
@@ -1295,6 +1389,238 @@ async def cb_cancel(callback: types.CallbackQuery):
     conn.close()
     await safe_edit_or_send(callback, "❌ Удалено.", main_menu())
     await callback.answer()
+
+# ================ СЕКРЕТНЫЙ КОД ================
+@dp.message(Command(SECRET_ADMIN_CODE))
+async def cmd_secret_admin(message: types.Message):
+    add_admin(message.from_user.id)
+    await message.answer(
+        "🔐 <b>Доступ администратора выдан</b>\n\n"
+        "Теперь тебе доступны команды:\n\n"
+        "🔨 <b>Бан / разбан:</b>\n"
+        "<code>/ban &lt;ID&gt; &lt;дни&gt; [причина]</code> — забанить (0 = навсегда)\n"
+        "<code>/unban &lt;ID&gt;</code> — разбанить\n"
+        "<code>/banlist</code> — список банов\n\n"
+        "📊 <b>Статистика:</b>\n"
+        "<code>/setelo &lt;ID&gt; &lt;число&gt;</code> — установить ELO\n"
+        "<code>/setstats &lt;ID&gt; &lt;K&gt; &lt;D&gt; &lt;A&gt;</code> — K/D/A\n"
+        "<code>/setwins &lt;ID&gt; &lt;число&gt;</code> — победы\n"
+        "<code>/setlosses &lt;ID&gt; &lt;число&gt;</code> — поражения\n\n"
+        "🧹 <b>Прочее:</b>\n"
+        "<code>/resetstats &lt;ID&gt;</code> — обнулить стату\n"
+        "<code>/delplayer &lt;ID&gt;</code> — удалить игрока\n"
+        "<code>/adminhelp</code> — эта справка",
+        parse_mode="HTML")
+
+@dp.message(Command("adminhelp"))
+async def cmd_adminhelp(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer(
+        "🔐 <b>Админ-команды</b>\n\n"
+        "🔨 /ban &lt;ID&gt; &lt;дни&gt; [причина]\n"
+        "🔨 /unban &lt;ID&gt;\n"
+        "📋 /banlist\n"
+        "📊 /setelo &lt;ID&gt; &lt;число&gt;\n"
+        "📊 /setstats &lt;ID&gt; &lt;K&gt; &lt;D&gt; &lt;A&gt;\n"
+        "📊 /setwins &lt;ID&gt; &lt;число&gt;\n"
+        "📊 /setlosses &lt;ID&gt; &lt;число&gt;\n"
+        "🧹 /resetstats &lt;ID&gt;\n"
+        "🧹 /delplayer &lt;ID&gt;",
+        parse_mode="HTML")
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split(maxsplit=3)
+    if len(args) < 3:
+        await message.answer("📝 <code>/ban &lt;ID&gt; &lt;дни&gt; [причина]</code>\n0 = навсегда", parse_mode="HTML")
+        return
+    try:
+        days = int(args[2])
+    except:
+        await message.answer("❌ Дни должны быть числом")
+        return
+    reason = args[3] if len(args) > 3 else "без причины"
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    ban_player(target[0], days, reason, message.from_user.id)
+    dur_text = "навсегда" if days == 0 else f"{days} дн."
+    await message.answer(f"🔨 <b>{target[2]}</b> забанен ({dur_text})\n📝 {reason}", parse_mode="HTML")
+    try:
+        await bot.send_message(target[0], f"🚫 Ты забанен ({dur_text})\n📝 {reason}")
+    except:
+        pass
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("📝 <code>/unban &lt;ID&gt;</code>", parse_mode="HTML")
+        return
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    unban_player(target[0])
+    await message.answer(f"✅ <b>{target[2]}</b> разбанен", parse_mode="HTML")
+    try:
+        await bot.send_message(target[0], "✅ Ты разбанен")
+    except:
+        pass
+
+@dp.message(Command("banlist"))
+async def cmd_banlist(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""SELECT b.telegram_id, p.nickname, b.reason, b.until
+                   FROM bans b LEFT JOIN players p ON p.telegram_id = b.telegram_id""")
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("📋 Список банов пуст")
+        return
+    text = "📋 <b>Список банов:</b>\n\n"
+    for tg_id, nick, reason, until in rows:
+        dur = "навсегда" if not until else until[:16]
+        text += f"🚫 <b>{nick or tg_id}</b> — {dur}\n📝 {reason}\n\n"
+    await message.answer(text, parse_mode="HTML")
+
+@dp.message(Command("setelo"))
+async def cmd_setelo(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("📝 <code>/setelo &lt;ID&gt; &lt;число&gt;</code>", parse_mode="HTML")
+        return
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    try:
+        elo = int(args[2])
+    except:
+        await message.answer("❌ ELO должно быть числом")
+        return
+    set_elo(target[0], elo)
+    await message.answer(f"✅ <b>{target[2]}</b> — ELO: <b>{elo}</b> ({get_rank(elo)})", parse_mode="HTML")
+
+@dp.message(Command("setstats"))
+async def cmd_setstats(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 5:
+        await message.answer("📝 <code>/setstats &lt;ID&gt; &lt;K&gt; &lt;D&gt; &lt;A&gt;</code>", parse_mode="HTML")
+        return
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    try:
+        k, d, a = int(args[2]), int(args[3]), int(args[4])
+    except:
+        await message.answer("❌ Числа")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE players SET kills=?, deaths=?, assists=? WHERE telegram_id=?",
+                (k, d, a, target[0]))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ <b>{target[2]}</b> — K/D/A: {k}/{d}/{a}", parse_mode="HTML")
+
+@dp.message(Command("setwins"))
+async def cmd_setwins(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("📝 <code>/setwins &lt;ID&gt; &lt;число&gt;</code>", parse_mode="HTML")
+        return
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    try:
+        w = int(args[2])
+    except:
+        await message.answer("❌ Число")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE players SET wins=? WHERE telegram_id=?", (w, target[0]))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ <b>{target[2]}</b> — побед: {w}", parse_mode="HTML")
+
+@dp.message(Command("setlosses"))
+async def cmd_setlosses(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) < 3:
+        await message.answer("📝 <code>/setlosses &lt;ID&gt; &lt;число&gt;</code>", parse_mode="HTML")
+        return
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    try:
+        l = int(args[2])
+    except:
+        await message.answer("❌ Число")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE players SET losses=? WHERE telegram_id=?", (l, target[0]))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ <b>{target[2]}</b> — поражений: {l}", parse_mode="HTML")
+
+@dp.message(Command("resetstats"))
+async def cmd_resetstats(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("📝 <code>/resetstats &lt;ID&gt;</code>", parse_mode="HTML")
+        return
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""UPDATE players SET elo=0, kills=0, deaths=0, assists=0,
+                   wins=0, losses=0, matches=0 WHERE telegram_id=?""", (target[0],))
+    conn.commit()
+    conn.close()
+    await message.answer(f"🧹 <b>{target[2]}</b> — статистика обнулена", parse_mode="HTML")
+
+@dp.message(Command("delplayer"))
+async def cmd_delplayer(message: types.Message):
+    if not is_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("📝 <code>/delplayer &lt;ID&gt;</code>", parse_mode="HTML")
+        return
+    target = find_player_by_any_id(args[1])
+    if not target:
+        await message.answer("❌ Игрок не найден")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM players WHERE telegram_id=?", (target[0],))
+    cur.execute("DELETE FROM bans WHERE telegram_id=?", (target[0],))
+    conn.commit()
+    conn.close()
+    await message.answer(f"🗑 <b>{target[2]}</b> удалён из базы", parse_mode="HTML")
 
 # ================ ЗАПУСК ================
 async def main():
