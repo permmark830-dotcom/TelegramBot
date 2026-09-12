@@ -339,6 +339,18 @@ def captain_result_menu(lobby_id):
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+# ================= БЕЗОПАСНОЕ РЕДАКТИРОВАНИЕ =================
+async def safe_edit_or_send(callback: types.CallbackQuery, text, kb):
+    """Пробует отредактировать, если не получилось — шлёт новое."""
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        print(f"[edit failed] {e}")
+        try:
+            await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        except Exception as e2:
+            print(f"[send failed] {e2}")
+
 # ================= ХЭНДЛЕРЫ =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -386,7 +398,7 @@ async def reg_nick(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data == "back_main")
 async def cb_back_main(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("🏠 Главное меню", reply_markup=main_menu())
+    await safe_edit_or_send(callback, "🏠 Главное меню", main_menu())
     await callback.answer()
 
 @dp.callback_query(F.data == "profile")
@@ -397,7 +409,7 @@ async def cb_profile(callback: types.CallbackQuery):
         return
     wr = round(p[7] / p[10] * 100, 1) if p[10] > 0 else 0
     kd = round(p[4] / p[5], 2) if p[5] > 0 else p[4]
-    await callback.message.edit_text(
+    text = (
         f"👤 <b>Профиль</b>\n\n"
         f"🆔 <code>{p[1]}</code>\n"
         f"🏷 <b>{p[2]}</b>\n"
@@ -406,8 +418,14 @@ async def cb_profile(callback: types.CallbackQuery):
         f"🔫 K/D/A: {p[4]}/{p[5]}/{p[6]}\n"
         f"📈 K/D: {kd}\n"
         f"🏆 {p[7]} | 💀 {p[8]} | 🎮 {p[10]}\n"
-        f"📊 Винрейт: {wr}%",
-        reply_markup=main_menu(), parse_mode="HTML")
+        f"📊 Винрейт: {wr}%\n\n"
+        f"📝 <b>Команды:</b>\n"
+        f"/rename &lt;новое_имя&gt; — сменить ник\n"
+        f"/id &lt;новый_ID&gt; — сменить игровой ID\n"
+        f"/profile — этот профиль\n"
+        f"/top — топ-10"
+    )
+    await safe_edit_or_send(callback, text, main_menu())
     await callback.answer()
 
 @dp.callback_query(F.data == "top")
@@ -424,7 +442,7 @@ async def cb_top(callback: types.CallbackQuery):
     for i, (n, e, k, d) in enumerate(rows, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
         text += f"{medal} <b>{n}</b> — {e} {get_rank(e)} ({k}/{d})\n"
-    await callback.message.edit_text(text, reply_markup=main_menu(), parse_mode="HTML")
+    await safe_edit_or_send(callback, text, main_menu())
     await callback.answer()
 
 @dp.callback_query(F.data == "history")
@@ -440,12 +458,12 @@ async def cb_history(callback: types.CallbackQuery):
     text = "📜 <b>Последние матчи</b>\n\n"
     for code, mode, mp, score in rows:
         text += f"🎮 {mode} • 🗺 {mp} • {score} • <code>{code}</code>\n"
-    await callback.message.edit_text(text, reply_markup=main_menu(), parse_mode="HTML")
+    await safe_edit_or_send(callback, text, main_menu())
     await callback.answer()
 
 @dp.callback_query(F.data == "help")
 async def cb_help(callback: types.CallbackQuery):
-    await callback.message.edit_text(
+    text = (
         "📖 <b>Помощь</b>\n\n"
         "👥 <b>Пати</b> — собери друзей. Приглашай по ID.\n"
         "➕ <b>Лобби</b> — для одиночной игры.\n"
@@ -455,9 +473,108 @@ async def cb_help(callback: types.CallbackQuery):
         "Бан карт: капитаны банят по очереди.\n\n"
         "Когда все зашли — 20 сек на подготовку, потом 30 сек на Я ГОТОВ.\n\n"
         "После матча капитан грузит скрин + K/D/A.\n"
-        "Забыл скрин — −10 ELO.",
-        reply_markup=main_menu(), parse_mode="HTML")
+        "Забыл скрин — −10 ELO.\n\n"
+        "📝 <b>Все команды:</b>\n"
+        "/start — главное меню\n"
+        "/profile — профиль\n"
+        "/top — топ-10\n"
+        "/rename &lt;имя&gt; — сменить ник\n"
+        "/id &lt;ID&gt; — сменить игровой ID\n"
+        "/join &lt;код&gt; — зайти в лобби\n"
+        "/result &lt;код&gt; &lt;счёт&gt; — ввести результат"
+    )
+    await safe_edit_or_send(callback, text, main_menu())
     await callback.answer()
+
+# ================ КОМАНДЫ ================
+@dp.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    p = get_player(message.from_user.id)
+    if not p:
+        await message.answer("Сначала /start")
+        return
+    wr = round(p[7] / p[10] * 100, 1) if p[10] > 0 else 0
+    kd = round(p[4] / p[5], 2) if p[5] > 0 else p[4]
+    text = (
+        f"👤 <b>Профиль</b>\n\n"
+        f"🆔 <code>{p[1]}</code>\n"
+        f"🏷 <b>{p[2]}</b>\n"
+        f"{get_rank(p[3])}\n"
+        f"📊 ELO: <b>{p[3]}</b>\n"
+        f"🔫 K/D/A: {p[4]}/{p[5]}/{p[6]}\n"
+        f"📈 K/D: {kd}\n"
+        f"🏆 {p[7]} | 💀 {p[8]} | 🎮 {p[10]}\n"
+        f"📊 Винрейт: {wr}%\n\n"
+        f"📝 /rename &lt;имя&gt; — сменить ник\n"
+        f"📝 /id &lt;ID&gt; — сменить игровой ID"
+    )
+    await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+
+@dp.message(Command("top"))
+async def cmd_top(message: types.Message):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT nickname, elo, kills, deaths FROM players ORDER BY elo DESC LIMIT 10")
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        await message.answer("Пусто")
+        return
+    text = "🏆 <b>Топ-10</b>\n\n"
+    for i, (n, e, k, d) in enumerate(rows, 1):
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+        text += f"{medal} <b>{n}</b> — {e} {get_rank(e)} ({k}/{d})\n"
+    await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+
+@dp.message(Command("rename"))
+async def cmd_rename(message: types.Message):
+    p = get_player(message.from_user.id)
+    if not p:
+        await message.answer("Сначала /start")
+        return
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("📝 Использование: <code>/rename НовыйНик</code>", parse_mode="HTML")
+        return
+    new_nick = args[1].strip()
+    if len(new_nick) < 2 or len(new_nick) > 32:
+        await message.answer("❌ Ник должен быть от 2 до 32 символов")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE players SET nickname=? WHERE telegram_id=?", (new_nick, message.from_user.id))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ Ник изменён на <b>{new_nick}</b>", parse_mode="HTML")
+
+@dp.message(Command("id"))
+async def cmd_id(message: types.Message):
+    p = get_player(message.from_user.id)
+    if not p:
+        await message.answer("Сначала /start")
+        return
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            f"🆔 Твой текущий ID: <code>{p[1]}</code>\n\n"
+            f"📝 Сменить: <code>/id НовыйID</code>",
+            parse_mode="HTML")
+        return
+    new_id = args[1].strip()
+    if len(new_id) < 3 or len(new_id) > 32:
+        await message.answer("❌ ID должен быть от 3 до 32 символов")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT telegram_id FROM players WHERE game_id=?", (new_id,))
+    if cur.fetchone():
+        conn.close()
+        await message.answer("❌ Этот ID уже занят другим игроком")
+        return
+    cur.execute("UPDATE players SET game_id=? WHERE telegram_id=?", (new_id, message.from_user.id))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ Игровой ID изменён на <code>{new_id}</code>", parse_mode="HTML")
 
 # ================ ПАТИ ================
 @dp.callback_query(F.data == "party_create")
@@ -601,14 +718,14 @@ async def cb_party_play(callback: types.CallbackQuery):
     if len(members) < 2:
         await callback.answer("Минимум 2", show_alert=True)
         return
-    await callback.message.edit_text(f"🎯 Режим ({len(members)} чел):", reply_markup=mode_menu(party_id))
+    await safe_edit_or_send(callback, f"🎯 Режим ({len(members)} чел):", mode_menu(party_id))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("party_leave_"))
 async def cb_party_leave(callback: types.CallbackQuery):
     party_id = int(callback.data.split("_")[2])
     remove_from_party(party_id, callback.from_user.id)
-    await callback.message.edit_text("🚪 Вышел.", reply_markup=main_menu())
+    await safe_edit_or_send(callback, "🚪 Вышел.", main_menu())
     await refresh_party_message(party_id)
     await callback.answer()
 
@@ -621,7 +738,7 @@ async def cb_party_disband(callback: types.CallbackQuery):
     cur.execute("DELETE FROM party_members WHERE party_id=?", (party_id,))
     conn.commit()
     conn.close()
-    await callback.message.edit_text("❌ Распущено.", reply_markup=main_menu())
+    await safe_edit_or_send(callback, "❌ Распущено.", main_menu())
     await callback.answer()
 
 # ================ ЛОББИ ================
@@ -634,7 +751,7 @@ async def cb_create_lobby(callback: types.CallbackQuery):
     if get_player_party(callback.from_user.id):
         await callback.answer("Выйди из пати", show_alert=True)
         return
-    await callback.message.edit_text("🎯 Режим:", reply_markup=mode_menu())
+    await safe_edit_or_send(callback, "🎯 Режим:", mode_menu())
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("mode_"))
@@ -647,6 +764,7 @@ async def cb_mode(callback: types.CallbackQuery):
         if party:
             members = get_party_members(party_id)
             await create_lobby_from_party(callback, mode, party, members)
+            await callback.answer()
             return
     await create_lobby_single(callback, mode)
     await callback.answer()
@@ -732,7 +850,6 @@ async def cb_join(callback: types.CallbackQuery):
     await refresh_lobby_message(lobby_id)
     await callback.answer("✅ В лобби!")
 
-# ================ ИСПРАВЛЕННАЯ ФУНКЦИЯ ОБНОВЛЕНИЯ ЛОББИ ================
 async def refresh_lobby_message(lobby_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -772,7 +889,6 @@ async def refresh_lobby_message(lobby_id):
     else:
         text += f"\n✅ Все на месте!"
 
-    # Пробуем обновить старое
     edited = False
     try:
         await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
@@ -781,7 +897,6 @@ async def refresh_lobby_message(lobby_id):
     except Exception as e:
         print(f"[lobby {lobby_id}] edit failed: {e}")
 
-    # Если не получилось — шлём всем игрокам новое
     if not edited:
         for p in players:
             try:
@@ -1153,8 +1268,7 @@ async def cb_find(callback: types.CallbackQuery):
         kb.append([InlineKeyboardButton(text=f"{mode} • {cnt}/{maxp} | {code}",
                                         callback_data=f"join_{lid}")])
     kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
-    await callback.message.edit_text("🔍 <b>Открытые:</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+    await safe_edit_or_send(callback, "🔍 <b>Открытые:</b>", InlineKeyboardMarkup(inline_keyboard=kb))
     await callback.answer()
 
 # ================ ВЫХОД ================
@@ -1167,7 +1281,7 @@ async def cb_leave(callback: types.CallbackQuery):
                 (lobby_id, callback.from_user.id))
     conn.commit()
     conn.close()
-    await callback.message.edit_text("🚪 Покинул.", reply_markup=main_menu())
+    await safe_edit_or_send(callback, "🚪 Покинул.", main_menu())
     await refresh_lobby_message(lobby_id)
     await callback.answer()
 
@@ -1179,7 +1293,7 @@ async def cb_cancel(callback: types.CallbackQuery):
     cur.execute("UPDATE lobbies SET status='cancelled' WHERE id=?", (lobby_id,))
     conn.commit()
     conn.close()
-    await callback.message.edit_text("❌ Удалено.", reply_markup=main_menu())
+    await safe_edit_or_send(callback, "❌ Удалено.", main_menu())
     await callback.answer()
 
 # ================ ЗАПУСК ================
